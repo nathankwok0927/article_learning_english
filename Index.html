@@ -1,704 +1,655 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { BookOpen, CheckCircle, GraduationCap, ArrowRight, ArrowLeft, RefreshCcw, Type, Languages, Brain, ChevronDown, ChevronUp, ClipboardList, Award, Link as LinkIcon, Download, Save, Trash2, List, Settings, Key, Eye, EyeOff, Cloud, CloudLightning, Lock, Search, PlusCircle } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, query, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
-
-// --- API & Utilities ---
-
-// 升級回 Gemini 2.5 Flash
-const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
-
-// 保留平台注入機制，同時支援 UI 設定
-const apiKey = ""; 
-
-// Helper to call Gemini API
-async function generateContent(prompt, systemInstruction = "", userApiKey = null) {
-  const keyToUse = userApiKey || apiKey;
-  
-  if (!keyToUse) {
-    throw new Error("No API Key provided. Please enter your Gemini API Key in the settings.");
-  }
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${keyToUse}`;
-  
-  const payload = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      responseMimeType: "application/json"
-    }
-  };
-
-  if (systemInstruction) {
-    payload.systemInstruction = { parts: [{ text: systemInstruction }] };
-  }
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      // 修正：某些環境下 mode: 'cors' 配合 credentials: 'omit' 會更穩定
-      mode: 'cors',
-      credentials: 'omit'
-    });
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI English Tutor v2.0</title>
     
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({})); 
-      throw new Error(`API Error: ${response.status} - ${errData.error?.message || response.statusText}`);
-    }
-
-    const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    const cleanText = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    return JSON.parse(cleanText);
-  } catch (error) {
-    console.error("Gemini API Error:", error);
-    if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
-      throw new Error("連線錯誤：請檢查網路，或確認 API Key 是否正確。");
-    }
-    throw error;
-  }
-}
-
-// Helper for plain text Gemini call (for HTML extraction)
-async function generateTextContent(prompt, userApiKey = null) {
-  const keyToUse = userApiKey || apiKey;
-  if (!keyToUse) throw new Error("No API Key provided.");
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${keyToUse}`;
-  
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-      mode: 'cors',
-      credentials: 'omit'
-    });
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
     
-    if (!response.ok) throw new Error("API Request Failed");
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-  } catch (error) {
-    console.error("Gemini Text API Error:", error);
-    throw error;
-  }
-}
-
-// --- Components ---
-
-const LoadingSpinner = ({ text }) => (
-  <div className="flex flex-col items-center justify-center py-12 text-blue-600 animate-pulse">
-    <Brain size={48} className="mb-4" />
-    <p className="text-lg font-medium font-sans">{text || "AI 導師正在思考中..."}</p>
-  </div>
-);
-
-export default function EnglishCramSchool() {
-  // --- Firebase Initialization ---
-  const [user, setUser] = useState(null);
-  const [db, setDb] = useState(null);
-  const [appId, setAppId] = useState(null);
-  const [savedVocabList, setSavedVocabList] = useState([]);
-  
-  // API Key State
-  const [userApiKey, setUserApiKey] = useState('');
-  const [keyLoadedFromCloud, setKeyLoadedFromCloud] = useState(false);
-  const [isSavingKey, setIsSavingKey] = useState(false);
-  
-  useEffect(() => {
-    try {
-      const firebaseConfig = JSON.parse(__firebase_config);
-      const app = initializeApp(firebaseConfig);
-      const auth = getAuth(app);
-      const firestore = getFirestore(app);
-      setDb(firestore);
-      setAppId(typeof __app_id !== 'undefined' ? __app_id : 'default-app-id');
-
-      const initAuth = async () => {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+    <!-- Import Map: 告訴瀏覽器 "react" 和 "firebase" 在哪裡 -->
+    <script type="importmap">
+    {
+        "imports": {
+            "react": "https://esm.sh/react@18.2.0",
+            "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+            "lucide-react": "https://esm.sh/lucide-react@0.263.1",
+            "firebase/app": "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js",
+            "firebase/auth": "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js",
+            "firebase/firestore": "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js"
         }
-      };
-      initAuth();
-
-      const unsubscribe = onAuthStateChanged(auth, (u) => {
-        setUser(u);
-      });
-      return () => unsubscribe();
-    } catch (e) {
-      console.error("Firebase Init Error:", e);
     }
-  }, []);
+    </script>
 
-  // Load API Key & Vocab
-  useEffect(() => {
-    if (!user || !db || !appId) return;
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    // 1. Load Key
-    const loadApiKey = async () => {
-      try {
-        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config');
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists() && docSnap.data().gemini_api_key) {
-          setUserApiKey(docSnap.data().gemini_api_key);
-          setKeyLoadedFromCloud(true);
-        }
-      } catch (error) { console.error("Error loading key:", error); }
-    };
-    loadApiKey();
+    <style>
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-in { animation: fadeIn 0.3s ease-out forwards; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+    <div id="root"></div>
 
-    // 2. Load Vocab
-    const q = collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary');
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const words = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      words.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
-      setSavedVocabList(words);
-    });
-    return () => unsubscribe();
-  }, [user, db, appId]);
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { BookOpen, CheckCircle, GraduationCap, ArrowRight, ArrowLeft, RefreshCcw, Type, Languages, Brain, ChevronDown, ChevronUp, ClipboardList, Award, Link as LinkIcon, Download, Save, Trash2, List, Settings, Key, Eye, EyeOff, Cloud, CloudLightning, Lock, Search, PlusCircle } from 'lucide-react';
+        import { initializeApp } from 'firebase/app';
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
+        import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, query, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 
-  const saveApiKeyToCloud = async () => {
-    if (!user || !db || !appId || !userApiKey) return;
-    setIsSavingKey(true);
-    try {
-      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'settings', 'config'), {
-        gemini_api_key: userApiKey,
-        updatedAt: Date.now()
-      }, { merge: true });
-      setKeyLoadedFromCloud(true);
-      alert("API Key 已安全儲存！");
-      setIsSettingsOpen(false);
-    } catch (e) { alert("儲存失敗"); } finally { setIsSavingKey(false); }
-  };
-
-  // --- App State ---
-  const [phase, setPhase] = useState('setup');
-  const [userLevel, setUserLevel] = useState('HKDSE Level 2 (A2-B1)');
-  const [articleText, setArticleText] = useState('');
-  const [urlInput, setUrlInput] = useState('');
-  const [segments, setSegments] = useState([]);
-  const [currentSegmentIndex, setCurrentSegmentIndex] = useState(0);
-  
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-
-  // Learning Content Cache
-  const [segmentAnalyses, setSegmentAnalyses] = useState({});
-  const [loading, setLoading] = useState(false);
-  const [fetchingUrl, setFetchingUrl] = useState(false);
-  
-  // Quiz Data
-  const [quizData, setQuizData] = useState(null);
-  const [userAnswers, setUserAnswers] = useState({});
-  const [gradingResult, setGradingResult] = useState(null);
-
-  // Text Selection State (Highlight Feature)
-  const [selection, setSelection] = useState(null); // { text, x, y }
-  const [analyzingSelection, setAnalyzingSelection] = useState(false);
-
-  // --- Logic ---
-
-  const fetchArticleFromUrl = async () => {
-    if (!urlInput.trim()) return;
-    setFetchingUrl(true);
-    try {
-      // Fallback Strategy: AllOrigins -> CorsProxy -> Error
-      let rawHtml = null;
-      try {
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(urlInput)}`;
-        const r = await fetch(proxyUrl);
-        if (r.ok) { const d = await r.json(); if(d.contents) rawHtml = d.contents; }
-      } catch (e) { console.warn("AllOrigins failed", e); }
-
-      if (!rawHtml) {
-         try {
-             const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(urlInput)}`);
-             if (r.ok) rawHtml = await r.text();
-         } catch (e) { console.warn("CorsProxy failed", e); }
-      }
-
-      if (!rawHtml) throw new Error("無法抓取網頁，請手動複製貼上。");
-      
-      const truncatedHtml = rawHtml.slice(0, 150000);
-      const prompt = `Extract ONLY main article content. Remove ads/nav. Return plain English text. HTML: ${truncatedHtml}`;
-      const extractedText = await generateTextContent(prompt, userApiKey);
-      
-      if (!extractedText || extractedText.trim().length < 50) {
-        alert("內容提取失敗，請手動複製。");
-      } else {
-        setArticleText(extractedText.trim());
-      }
-    } catch (error) {
-      alert(`錯誤: ${error.message}`);
-    } finally {
-      setFetchingUrl(false);
-    }
-  };
-
-  const startClass = () => {
-    if (!articleText.trim()) return;
-    const rawSegments = articleText.split(/\n\s*\n/).filter(s => s.trim().length > 0);
-    setSegments(rawSegments);
-    setPhase('classroom');
-    setCurrentSegmentIndex(0);
-    setSegmentAnalyses({});
-  };
-
-  const saveWordToFirebase = async (wordData) => {
-    if (!user || !db || !appId) return;
-    try {
-      await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'vocabulary'), {
-        ...wordData,
-        timestamp: Date.now(),
-        source: "Class Session"
-      });
-    } catch (e) { console.error("Error saving word:", e); }
-  };
-
-  const deleteWordFromFirebase = async (docId) => {
-    if (!user || !db || !appId) return;
-    try {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'vocabulary', docId));
-    } catch (e) { console.error("Error deleting word:", e); }
-  };
-
-  const saveAllVocab = async () => {
-    const allWords = Object.values(segmentAnalyses).flatMap(seg => seg.vocab);
-    let count = 0;
-    for (const w of allWords) { await saveWordToFirebase(w); count++; }
-    alert(`成功儲存 ${count} 個單字！`);
-  };
-
-  // --- New Feature: Highlight to Add ---
-  
-  const handleTextSelection = () => {
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0) return;
-
-    const text = sel.toString().trim();
-    if (text.length > 0 && text.length < 50) { // Limit length to avoid selecting paragraphs
-      const range = sel.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      
-      // Calculate position relative to viewport, handling scroll
-      setSelection({
-        text: text,
-        x: rect.left + window.scrollX + rect.width / 2,
-        y: rect.top + window.scrollY - 10 
-      });
-    } else {
-      setSelection(null);
-    }
-  };
-
-  const analyzeAndSaveSelection = async () => {
-    if (!selection) return;
-    setAnalyzingSelection(true);
-    
-    try {
-      const prompt = `
-        Analyze the word/phrase: "${selection.text}".
-        Context: It is from an English article.
-        Target User: ${userLevel} student.
+        // ==========================================
+        // ⚠️ 請在這裡填入你的 FIREBASE 設定 ⚠️
+        // ==========================================
+        const firebaseConfig = {
+            apiKey: "AIzaSyA14c5Rjzun6C33DWiMmpyKNfXZ2BC6lso",
+            authDomain: "ai-english-tutor-f2a01.firebaseapp.com",
+            projectId: "ai-english-tutor-f2a01",
+            storageBucket: "ai-english-tutor-f2a01.firebasestorage.app",
+            messagingSenderId: "404894794284",
+            appId: "1:404894794284:web:28fa60b12a486715990789",
+            measurementId: "G-6RC6GV81E3"
+        };
         
-        Return STRICT JSON:
-        {
-          "word": "${selection.text}",
-          "pos": "part of speech",
-          "meaning_zh": "Traditional Chinese meaning",
-          "note": "Simple English definition or synonym"
-        }
-      `;
-      
-      const result = await generateContent(prompt, "", userApiKey);
-      await saveWordToFirebase(result);
-      setSelection(null); // Close popup
-      // Optional: Show success toast?
-    } catch (e) {
-      console.error(e);
-      alert("分析失敗，請重試");
-    } finally {
-      setAnalyzingSelection(false);
-    }
-  };
+        // 為了相容性，這裡設定一個預設的 App ID
+        const APP_ID_TAG = "ai-tutor-v2";
 
-  // --- Effects for Analysis ---
-
-  useEffect(() => {
-    if (phase === 'classroom' && segments.length > 0) {
-      const index = currentSegmentIndex;
-      // Only fetch if not already cached
-      if (!segmentAnalyses[index]) {
-        setLoading(true);
-        const segmentText = segments[index];
+        // --- API & Utilities ---
+        const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
         
-        const systemPrompt = `You are an expert ESL Tutor for ${userLevel}. Output JSON.`;
-        const userPrompt = `
-          Analyze segment: "${segmentText}"
-          Return JSON:
-          {
-            "vocab": [{ "word": "string", "pos": "string", "meaning_zh": "string (Trad Chi)", "note": "string" }],
-            "grammar": { "title": "string", "explanation": "string (Trad Chi)" },
-            "translation": "string (Trad Chi)"
-          }
-          Select 3-5 difficult words.
-        `;
+        // 這是預設的 API Key (如果你有寫死的需求)，但我們主要依賴 UI 輸入
+        const defaultApiKey = ""; 
 
-        generateContent(userPrompt, systemPrompt, userApiKey)
-          .then(data => {
-            setSegmentAnalyses(prev => ({ ...prev, [index]: data }));
-            setLoading(false);
-          })
-          .catch(err => {
-            setLoading(false);
-            // Error handling (mock data to prevent block)
-            setSegmentAnalyses(prev => ({ 
-              ...prev, 
-              [index]: {
-                vocab: [],
-                grammar: { title: "API Error", explanation: "連線失敗，無法分析此段落。" },
-                translation: "無法翻譯"
-              } 
-            }));
-          });
-      }
-    }
-  }, [phase, currentSegmentIndex, segments, userLevel, userApiKey]);
+        // Helper to call Gemini API
+        async function generateContent(prompt, systemInstruction = "", userApiKey = null) {
+            const keyToUse = userApiKey || defaultApiKey;
+            
+            if (!keyToUse) {
+                throw new Error("請先在右上角設定您的 Google Gemini API Key。");
+            }
 
-  // --- Navigation Logic ---
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${keyToUse}`;
+            
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }],
+                generationConfig: { responseMimeType: "application/json" }
+            };
 
-  const handleNextSegment = () => {
-    if (currentSegmentIndex < segments.length - 1) {
-      setCurrentSegmentIndex(prev => prev + 1);
-    } else {
-      generateQuiz();
-    }
-  };
+            if (systemInstruction) {
+                payload.systemInstruction = { parts: [{ text: systemInstruction }] };
+            }
 
-  const handlePrevSegment = () => {
-    if (currentSegmentIndex > 0) {
-      setCurrentSegmentIndex(prev => prev - 1);
-    }
-  };
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    const errData = await response.json().catch(() => ({})); 
+                    throw new Error(`API Error: ${response.status} - ${errData.error?.message || response.statusText}`);
+                }
 
-  const generateQuiz = () => {
-    setPhase('generating_quiz');
-    const fullText = segments.join('\n\n');
-    const systemPrompt = `Create quiz for ${userLevel}. Output JSON.`;
-    const userPrompt = `
-      Text: "${fullText}"
-      Return JSON:
-      {
-        "multiple_choice": [{ "id": "mc1", "question": "...", "options": ["A","B"], "correct_answer": "..." }],
-        "cloze": { "text_with_blanks": "Summary with ______", "keywords": ["..."] },
-        "short_answer": [{ "id": "sa1", "question": "..." }]
-      }
-    `;
+                const data = await response.json();
+                const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                const cleanText = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+                return JSON.parse(cleanText);
+            } catch (error) {
+                console.error("Gemini API Error:", error);
+                if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
+                    throw new Error("連線錯誤：請檢查網路，或確認 API Key 是否正確。");
+                }
+                throw error;
+            }
+        }
 
-    generateContent(userPrompt, systemPrompt, userApiKey)
-      .then(data => {
-        setQuizData(data);
-        setPhase('quiz');
-      })
-      .catch(err => {
-        setPhase('setup');
-        alert("無法產生測驗。");
-      });
-  };
+        // Helper for plain text Gemini call (for HTML extraction)
+        async function generateTextContent(prompt, userApiKey = null) {
+            const keyToUse = userApiKey || defaultApiKey;
+            if (!keyToUse) throw new Error("No API Key provided.");
 
-  const submitQuiz = () => {
-    setLoading(true);
-    const systemPrompt = `Grade answers. Output JSON.`;
-    const userPrompt = `
-      Quiz: ${JSON.stringify(quizData)}
-      Answers: ${JSON.stringify(userAnswers)}
-      Return JSON:
-      {
-        "score": number,
-        "feedback": "string (Chi)",
-        "corrections": [{ "question_id": "...", "user_answer": "...", "correct_answer": "...", "explanation": "..." }]
-      }
-    `;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${keyToUse}`;
+            
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+                });
+                
+                if (!response.ok) throw new Error("API Request Failed");
+                const data = await response.json();
+                return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            } catch (error) {
+                console.error("Gemini Text API Error:", error);
+                throw error;
+            }
+        }
 
-    generateContent(userPrompt, systemPrompt, userApiKey)
-      .then(data => {
-        setGradingResult(data);
-        setPhase('review');
-        setLoading(false);
-      })
-      .catch(err => setLoading(false));
-  };
+        // --- Components ---
 
-  // --- Renders ---
-
-  const ProgressBar = () => (
-    <div className="w-full bg-gray-200 rounded-full h-2.5 mb-6">
-      <div 
-        className="bg-blue-600 h-2.5 rounded-full transition-all duration-500" 
-        style={{ width: `${((currentSegmentIndex + 1) / segments.length) * 100}%` }}
-      ></div>
-    </div>
-  );
-
-  // Setup View
-  if (phase === 'setup') {
-    return (
-      <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6 flex items-center justify-center">
-        <div className="max-w-3xl w-full bg-white rounded-xl shadow-lg p-8 border border-slate-200">
-          
-          <div className="text-center mb-8 relative">
-            <div className="absolute top-0 right-0 flex gap-2">
-              <button 
-                onClick={() => setIsSettingsOpen(!isSettingsOpen)}
-                className={`text-sm px-3 py-1 rounded-full font-bold transition-colors flex items-center gap-2 shadow-sm border ${
-                  keyLoadedFromCloud 
-                    ? 'bg-green-50 text-green-700 border-green-200' 
-                    : (isSettingsOpen ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')
-                }`}
-              >
-                {keyLoadedFromCloud ? <CloudLightning size={14} /> : <Settings size={14} />}
-                {keyLoadedFromCloud ? "AI Ready" : "Set Key"}
-              </button>
-              {user && (
-                 <button onClick={() => setPhase('vocab_bank')} className="text-sm bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-full font-bold hover:bg-amber-100 transition-colors flex items-center gap-1 shadow-sm">
-                   <BookOpen size={14} /> 單字庫
-                 </button>
-              )}
+        const LoadingSpinner = ({ text }) => (
+            <div className="flex flex-col items-center justify-center py-12 text-blue-600 animate-pulse">
+                <Brain size={48} className="mb-4" />
+                <p className="text-lg font-medium font-sans">{text || "AI 導師正在思考中..."}</p>
             </div>
+        );
 
-            <div className="bg-blue-100 p-3 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4">
-              <GraduationCap size={32} className="text-blue-600" />
-            </div>
-            <h1 className="text-3xl font-bold text-slate-800 mb-2">AI 英文補習班 v2.0</h1>
-            <p className="text-slate-500">Gemini 2.5 Flash • 智慧單字反白 • 互動教學</p>
-          </div>
+        function EnglishCramSchool() {
+            // --- Firebase Initialization ---
+            const [user, setUser] = useState(null);
+            const [db, setDb] = useState(null);
+            const [savedVocabList, setSavedVocabList] = useState([]);
+            
+            // API Key State
+            const [userApiKey, setUserApiKey] = useState('');
+            const [keyLoadedFromCloud, setKeyLoadedFromCloud] = useState(false);
+            const [isSavingKey, setIsSavingKey] = useState(false);
+            
+            useEffect(() => {
+                try {
+                    // Initialize Firebase with the user-provided config
+                    if (!firebaseConfig.apiKey || firebaseConfig.apiKey === "你的_API_KEY") {
+                        console.warn("Firebase config not set properly.");
+                        return;
+                    }
+                    
+                    const app = initializeApp(firebaseConfig);
+                    const auth = getAuth(app);
+                    const firestore = getFirestore(app);
+                    setDb(firestore);
 
-          {/* Settings Panel */}
-          {isSettingsOpen && (
-            <div className="mb-6 bg-slate-900 text-slate-200 p-6 rounded-xl animate-in fade-in shadow-2xl">
-              <div className="flex items-center gap-2 text-yellow-400 font-bold text-lg mb-4">
-                <Key size={20} /> API Key 設定 (Cloud Safe)
-              </div>
-              <div className="relative mb-4">
-                <input 
-                  type={showApiKey ? "text" : "password"}
-                  value={userApiKey}
-                  onChange={(e) => setUserApiKey(e.target.value)}
-                  placeholder={keyLoadedFromCloud ? "Key Loaded from Cloud" : "Paste Gemini API Key..."}
-                  className="w-full p-4 pr-12 rounded-lg bg-slate-800 border border-slate-700 text-white focus:ring-2 focus:ring-yellow-400 outline-none font-mono text-sm"
-                />
-                <button onClick={() => setShowApiKey(!showApiKey)} className="absolute right-4 top-4 text-slate-500 hover:text-white">
-                  {showApiKey ? <EyeOff size={20} /> : <Eye size={20} />}
-                </button>
-              </div>
-              <div className="flex justify-end gap-3">
-                <button onClick={() => setIsSettingsOpen(false)} className="px-4 py-2 text-slate-400 hover:text-white">取消</button>
-                <button onClick={saveApiKeyToCloud} disabled={isSavingKey || !userApiKey} className="bg-yellow-500 hover:bg-yellow-600 text-black font-bold px-6 py-2 rounded-lg flex items-center gap-2">
-                  {isSavingKey ? <RefreshCcw className="animate-spin" size={18} /> : <Cloud size={18} />} 儲存
-                </button>
-              </div>
-            </div>
-          )}
+                    // Anonymous Auth
+                    signInAnonymously(auth).catch(e => console.error("Auth Error:", e));
 
-          <div className="space-y-6">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">選擇程度</label>
-              <select value={userLevel} onChange={(e) => setUserLevel(e.target.value)} className="w-full p-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
-                <option>HKDSE Level 2 (A2-B1)</option>
-                <option>HKDSE Level 3 (B1-B2)</option>
-                <option>HKDSE Level 4 (B2)</option>
-                <option>HKDSE Level 5+ (C1)</option>
-              </select>
-            </div>
+                    const unsubscribe = onAuthStateChanged(auth, (u) => {
+                        setUser(u);
+                    });
+                    return () => unsubscribe();
+                } catch (e) {
+                    console.error("Firebase Init Error:", e);
+                }
+            }, []);
 
-            <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
-              <label className="block text-sm font-medium text-slate-700 mb-2 flex items-center gap-2"><LinkIcon size={16} /> 網址匯入</label>
-              <div className="flex gap-2">
-                <input type="text" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder="https://..." className="flex-1 p-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" />
-                <button onClick={fetchArticleFromUrl} disabled={fetchingUrl || !urlInput} className="bg-blue-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-blue-600 flex items-center gap-2">
-                  {fetchingUrl ? <RefreshCcw className="animate-spin" size={18} /> : <Download size={18} />} 抓取
-                </button>
-              </div>
-            </div>
+            // Load API Key & Vocab
+            useEffect(() => {
+                if (!user || !db) return;
 
-            <textarea value={articleText} onChange={(e) => setArticleText(e.target.value)} placeholder="或在此貼上文章..." className="w-full h-48 p-4 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none font-mono text-sm" />
+                // 1. Load Key
+                const loadApiKey = async () => {
+                    try {
+                        const docRef = doc(db, 'artifacts', APP_ID_TAG, 'users', user.uid, 'settings', 'config');
+                        const docSnap = await getDoc(docRef);
+                        if (docSnap.exists() && docSnap.data().gemini_api_key) {
+                            setUserApiKey(docSnap.data().gemini_api_key);
+                            setKeyLoadedFromCloud(true);
+                        }
+                    } catch (error) { console.error("Error loading key:", error); }
+                };
+                loadApiKey();
 
-            <button onClick={startClass} disabled={!articleText.trim() || (!userApiKey && !apiKey)} className={`w-full py-4 rounded-lg font-bold text-lg flex items-center justify-center gap-2 ${!articleText.trim() || (!userApiKey && !apiKey) ? 'bg-gray-300 text-gray-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
-              <BookOpen size={20} /> {(!userApiKey && !apiKey) ? "請先設定 Key" : "開始上課"}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+                // 2. Load Vocab
+                const q = collection(db, 'artifacts', APP_ID_TAG, 'users', user.uid, 'vocabulary');
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    const words = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    words.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                    setSavedVocabList(words);
+                });
+                return () => unsubscribe();
+            }, [user, db]);
 
-  // Vocab Bank View
-  if (phase === 'vocab_bank') {
-    return (
-      <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6">
-        <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-lg p-8 min-h-[80vh]">
-          <header className="flex justify-between items-center mb-8 border-b pb-4">
-            <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-3"><BookOpen className="text-amber-600" /> 我的雲端單字庫</h1>
-            <button onClick={() => setPhase('setup')} className="text-slate-500 hover:text-blue-600 font-medium flex items-center gap-2"><ArrowLeft size={18} /> 返回</button>
-          </header>
-          {savedVocabList.length === 0 ? (
-            <div className="text-center py-16 text-slate-400"><List size={48} className="mx-auto mb-4 opacity-50" /><p>目前沒有單字，快去上課或反白單字來新增！</p></div>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-2">
-              {savedVocabList.map((item) => (
-                <div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative group">
-                  <button onClick={() => deleteWordFromFirebase(item.id)} className="absolute top-3 right-3 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={18} /></button>
-                  <div className="flex items-baseline justify-between mb-1"><h3 className="text-xl font-bold text-blue-700">{item.word}</h3><span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-500">{item.pos}</span></div>
-                  <p className="text-slate-800 font-medium mb-1">{item.meaning_zh}</p>
-                  <p className="text-sm text-slate-500 italic">{item.note}</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
+            const saveApiKeyToCloud = async () => {
+                if (!user || !db || !userApiKey) return;
+                setIsSavingKey(true);
+                try {
+                    await setDoc(doc(db, 'artifacts', APP_ID_TAG, 'users', user.uid, 'settings', 'config'), {
+                        gemini_api_key: userApiKey,
+                        updatedAt: Date.now()
+                    }, { merge: true });
+                    setKeyLoadedFromCloud(true);
+                    alert("API Key 已安全儲存！");
+                    setIsSettingsOpen(false);
+                } catch (e) { alert("儲存失敗: " + e.message); } finally { setIsSavingKey(false); }
+            };
 
-  // Classroom View
-  if (phase === 'classroom') {
-    const data = segmentAnalyses[currentSegmentIndex];
-    return (
-      <div className="min-h-screen bg-slate-50 font-sans text-slate-800" onClick={() => setSelection(null)}>
-        <div className="max-w-4xl mx-auto p-6 relative">
-          
-          {/* Highlight Popover */}
-          {selection && (
-            <div 
-              className="absolute z-50 bg-slate-900 text-white p-2 rounded-lg shadow-xl flex items-center gap-2 transform -translate-x-1/2 -translate-y-full mb-2 animate-in fade-in zoom-in-95"
-              style={{ left: selection.x, top: selection.y, position: 'fixed' }} // Use fixed for better positioning with scroll
-              onClick={(e) => e.stopPropagation()} // Prevent closing when clicking the popup itself
-            >
-              <span className="font-bold px-2 border-r border-slate-700">{selection.text}</span>
-              <button 
-                onClick={analyzeAndSaveSelection} 
-                disabled={analyzingSelection}
-                className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded-md text-sm transition-colors"
-              >
-                {analyzingSelection ? <RefreshCcw className="animate-spin" size={14} /> : <PlusCircle size={14} />}
-                解釋並收藏
-              </button>
-            </div>
-          )}
+            // --- App State ---
+            const [phase, setPhase] = useState('setup');
+            const [userLevel, setUserLevel] = useState('HKDSE Level 2 (A2-B1)');
+            const [articleText, setArticleText] = useState('');
+            const [urlInput, setUrlInput] = useState('');
+            const [segments, setSegments] = useState([]);
+            const [currentSegmentIndex, setCurrentSegmentIndex] = useState(0);
+            
+            const [showApiKey, setShowApiKey] = useState(false);
+            const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
-          <header className="flex justify-between items-center mb-6 border-b pb-4">
-            <h2 className="text-xl font-bold flex items-center gap-2 text-blue-900"><Brain className="text-blue-600" /> Segmented Teaching</h2>
-            <span className="text-sm bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-medium">{userLevel}</span>
-          </header>
-          <ProgressBar />
-          
-          {loading || !data ? (
-            <LoadingSpinner text="AI 老師正在分析..." />
-          ) : (
-            <div className="grid md:grid-cols-2 gap-8">
-              <div className="space-y-6">
-                <div 
-                  className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 relative"
-                  onMouseUp={handleTextSelection} // Enable highlight detection
-                >
-                  <div className="absolute top-4 right-4 text-xs text-slate-300 flex items-center gap-1">
-                    <Search size={12} /> 反白單字可查詢
-                  </div>
-                  <h3 className="text-sm font-bold text-slate-400 uppercase mb-3 tracking-wider">Original Text</h3>
-                  <p className="text-lg leading-relaxed font-medium text-slate-800 selection:bg-yellow-200 selection:text-slate-900">
-                    {segments[currentSegmentIndex]}
-                  </p>
-                </div>
-                <div className="bg-amber-50 p-6 rounded-xl border border-amber-100">
-                  <h3 className="text-sm font-bold text-amber-600 uppercase mb-3 tracking-wider flex items-center gap-2"><Type size={16} /> Grammar Note</h3>
-                  <div className="text-amber-900"><span className="font-bold block mb-1">{data.grammar.title}</span><p className="text-sm opacity-90">{data.grammar.explanation}</p></div>
-                </div>
-                <details className="bg-slate-100 p-4 rounded-xl cursor-pointer group">
-                  <summary className="font-medium text-slate-600 flex items-center gap-2 select-none"><Languages size={16} /> 查看中文翻譯 <ChevronDown className="ml-auto group-open:rotate-180 transition-transform" size={16} /></summary>
-                  <p className="mt-3 text-slate-700 leading-relaxed border-t border-slate-200 pt-3">{data.translation}</p>
-                </details>
-              </div>
-              <div className="space-y-4">
-                <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Award size={16} /> Key Vocabulary</h3>
-                <div className="space-y-3">
-                  {data.vocab.map((word, idx) => (
-                    <div key={idx} className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500 hover:shadow-md transition-shadow">
-                      <div className="flex justify-between items-baseline mb-1"><span className="text-lg font-bold text-blue-700">{word.word}</span><span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-500">{word.pos}</span></div>
-                      <p className="text-slate-800 font-medium">{word.meaning_zh}</p>
-                      <p className="text-sm text-slate-500 mt-1 italic">{word.note}</p>
+            // Learning Content Cache
+            const [segmentAnalyses, setSegmentAnalyses] = useState({});
+            const [loading, setLoading] = useState(false);
+            const [fetchingUrl, setFetchingUrl] = useState(false);
+            
+            // Quiz Data
+            const [quizData, setQuizData] = useState(null);
+            const [userAnswers, setUserAnswers] = useState({});
+            const [gradingResult, setGradingResult] = useState(null);
+
+            // Text Selection
+            const [selection, setSelection] = useState(null);
+            const [analyzingSelection, setAnalyzingSelection] = useState(false);
+
+            // --- Logic ---
+
+            const fetchArticleFromUrl = async () => {
+                if (!urlInput.trim()) return;
+                setFetchingUrl(true);
+                try {
+                    let rawHtml = null;
+                    // Strategy 1: AllOrigins
+                    try {
+                        const r = await fetch(`https://api.allorigins.win/get?url=${encodeURIComponent(urlInput)}`);
+                        if (r.ok) { const d = await r.json(); if(d.contents) rawHtml = d.contents; }
+                    } catch (e) { console.warn("AllOrigins failed", e); }
+
+                    // Strategy 2: CorsProxy
+                    if (!rawHtml) {
+                        try {
+                            const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(urlInput)}`);
+                            if (r.ok) rawHtml = await r.text();
+                        } catch (e) { console.warn("CorsProxy failed", e); }
+                    }
+
+                    if (!rawHtml) throw new Error("無法抓取網頁，請手動複製貼上。");
+                    
+                    const truncatedHtml = rawHtml.slice(0, 150000);
+                    const prompt = `Extract ONLY main article content. Remove ads/nav. Return plain English text. HTML: ${truncatedHtml}`;
+                    const extractedText = await generateTextContent(prompt, userApiKey);
+                    
+                    if (!extractedText || extractedText.trim().length < 50) {
+                        alert("內容提取失敗，請手動複製。");
+                    } else {
+                        setArticleText(extractedText.trim());
+                    }
+                } catch (error) {
+                    alert(`錯誤: ${error.message}`);
+                } finally {
+                    setFetchingUrl(false);
+                }
+            };
+
+            const startClass = () => {
+                if (!articleText.trim()) return;
+                const rawSegments = articleText.split(/\n\s*\n/).filter(s => s.trim().length > 0);
+                setSegments(rawSegments);
+                setPhase('classroom');
+                setCurrentSegmentIndex(0);
+                setSegmentAnalyses({});
+            };
+
+            const saveWordToFirebase = async (wordData) => {
+                if (!user || !db) return;
+                try {
+                    await addDoc(collection(db, 'artifacts', APP_ID_TAG, 'users', user.uid, 'vocabulary'), {
+                        ...wordData,
+                        timestamp: Date.now(),
+                        source: "Class Session"
+                    });
+                } catch (e) { console.error("Error saving word:", e); }
+            };
+
+            const deleteWordFromFirebase = async (docId) => {
+                if (!user || !db) return;
+                try {
+                    await deleteDoc(doc(db, 'artifacts', APP_ID_TAG, 'users', user.uid, 'vocabulary', docId));
+                } catch (e) { console.error("Error deleting word:", e); }
+            };
+
+            const saveAllVocab = async () => {
+                const allWords = Object.values(segmentAnalyses).flatMap(seg => seg.vocab);
+                let count = 0;
+                for (const w of allWords) { await saveWordToFirebase(w); count++; }
+                alert(`成功儲存 ${count} 個單字！`);
+            };
+
+            // Highlight Logic
+            const handleTextSelection = () => {
+                const sel = window.getSelection();
+                if (!sel || sel.rangeCount === 0) return;
+
+                const text = sel.toString().trim();
+                if (text.length > 0 && text.length < 50) {
+                    const range = sel.getRangeAt(0);
+                    const rect = range.getBoundingClientRect();
+                    setSelection({
+                        text: text,
+                        x: rect.left + window.scrollX + rect.width / 2,
+                        y: rect.top + window.scrollY - 10 
+                    });
+                } else {
+                    setSelection(null);
+                }
+            };
+
+            const analyzeAndSaveSelection = async () => {
+                if (!selection) return;
+                setAnalyzingSelection(true);
+                
+                try {
+                    const prompt = `Analyze: "${selection.text}". Context: English article. User: ${userLevel}. Return JSON: { "word": "${selection.text}", "pos": "pos", "meaning_zh": "Chi meaning", "note": "Eng def" }`;
+                    const result = await generateContent(prompt, "", userApiKey);
+                    await saveWordToFirebase(result);
+                    setSelection(null);
+                } catch (e) {
+                    console.error(e);
+                    alert("分析失敗");
+                } finally {
+                    setAnalyzingSelection(false);
+                }
+            };
+
+            // --- Effects for Analysis ---
+            useEffect(() => {
+                if (phase === 'classroom' && segments.length > 0) {
+                    const index = currentSegmentIndex;
+                    if (!segmentAnalyses[index]) {
+                        setLoading(true);
+                        const segmentText = segments[index];
+                        
+                        const systemPrompt = `You are an expert ESL Tutor for ${userLevel}. Output JSON.`;
+                        const userPrompt = `
+                            Analyze segment: "${segmentText}"
+                            Return JSON:
+                            {
+                                "vocab": [{ "word": "string", "pos": "string", "meaning_zh": "string (Trad Chi)", "note": "string" }],
+                                "grammar": { "title": "string", "explanation": "string (Trad Chi)" },
+                                "translation": "string (Trad Chi)"
+                            }
+                            Select 3-5 difficult words.
+                        `;
+
+                        generateContent(userPrompt, systemPrompt, userApiKey)
+                            .then(data => {
+                                setSegmentAnalyses(prev => ({ ...prev, [index]: data }));
+                                setLoading(false);
+                            })
+                            .catch(err => {
+                                setLoading(false);
+                                setSegmentAnalyses(prev => ({ 
+                                    ...prev, 
+                                    [index]: {
+                                        vocab: [],
+                                        grammar: { title: "API Error", explanation: "連線失敗: " + err.message },
+                                        translation: "無法翻譯"
+                                    } 
+                                }));
+                            });
+                    }
+                }
+            }, [phase, currentSegmentIndex, segments, userLevel, userApiKey]);
+
+            // Navigation
+            const handleNextSegment = () => {
+                if (currentSegmentIndex < segments.length - 1) {
+                    setCurrentSegmentIndex(prev => prev + 1);
+                } else {
+                    generateQuiz();
+                }
+            };
+
+            const handlePrevSegment = () => {
+                if (currentSegmentIndex > 0) {
+                    setCurrentSegmentIndex(prev => prev - 1);
+                }
+            };
+
+            const generateQuiz = () => {
+                setPhase('generating_quiz');
+                const fullText = segments.join('\n\n');
+                const systemPrompt = `Create quiz for ${userLevel}. Output JSON.`;
+                const userPrompt = `
+                    Text: "${fullText}"
+                    Return JSON:
+                    {
+                        "multiple_choice": [{ "id": "mc1", "question": "...", "options": ["A","B"], "correct_answer": "..." }],
+                        "cloze": { "text_with_blanks": "Summary with ______", "keywords": ["..."] },
+                        "short_answer": [{ "id": "sa1", "question": "..." }]
+                    }
+                `;
+
+                generateContent(userPrompt, systemPrompt, userApiKey)
+                    .then(data => {
+                        setQuizData(data);
+                        setPhase('quiz');
+                    })
+                    .catch(err => {
+                        setPhase('setup');
+                        alert("無法產生測驗: " + err.message);
+                    });
+            };
+
+            const submitQuiz = () => {
+                setLoading(true);
+                const systemPrompt = `Grade answers. Output JSON.`;
+                const userPrompt = `
+                    Quiz: ${JSON.stringify(quizData)}
+                    Answers: ${JSON.stringify(userAnswers)}
+                    Return JSON:
+                    {
+                        "score": number,
+                        "feedback": "string (Chi)",
+                        "corrections": [{ "question_id": "...", "user_answer": "...", "correct_answer": "...", "explanation": "..." }]
+                    }
+                `;
+
+                generateContent(userPrompt, systemPrompt, userApiKey)
+                    .then(data => {
+                        setGradingResult(data);
+                        setPhase('review');
+                        setLoading(false);
+                    })
+                    .catch(err => setLoading(false));
+            };
+
+            // Setup View
+            if (phase === 'setup') {
+                return (
+                    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6 flex items-center justify-center">
+                        <div className="max-w-3xl w-full bg-white rounded-xl shadow-lg p-8 border border-slate-200">
+                            <div className="text-center mb-8 relative">
+                                <div className="absolute top-0 right-0 flex gap-2">
+                                    <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} className={`text-sm px-3 py-1 rounded-full font-bold transition-colors flex items-center gap-2 shadow-sm border ${keyLoadedFromCloud ? 'bg-green-50 text-green-700 border-green-200' : (isSettingsOpen ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}`}>
+                                        {keyLoadedFromCloud ? <CloudLightning size={14} /> : <Settings size={14} />}
+                                        {keyLoadedFromCloud ? "AI Ready" : "Set Key"}
+                                    </button>
+                                    {user && (
+                                        <button onClick={() => setPhase('vocab_bank')} className="text-sm bg-amber-50 text-amber-800 border border-amber-200 px-3 py-1 rounded-full font-bold hover:bg-amber-100 transition-colors flex items-center gap-1 shadow-sm">
+                                            <BookOpen size={14} /> 單字庫
+                                        </button>
+                                    )}
+                                </div>
+                                <div className="bg-blue-100 p-3 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4"><GraduationCap size={32} className="text-blue-600" /></div>
+                                <h1 className="text-3xl font-bold text-slate-800 mb-2">AI 英文補習班 v2.0</h1>
+                                <p className="text-slate-500">HTML Standalone Version • 智慧反白 • 雲端進度</p>
+                            </div>
+
+                            {/* Settings */}
+                            {isSettingsOpen && (
+                                <div className="mb-6 bg-slate-900 text-slate-200 p-6 rounded-xl animate-in shadow-2xl">
+                                    <div className="flex items-center gap-2 text-yellow-400 font-bold text-lg mb-4"><Key size={20} /> API Key 設定</div>
+                                    <div className="relative mb-4">
+                                        <input type={showApiKey ? "text" : "password"} value={userApiKey} onChange={(e) => setUserApiKey(e.target.value)} placeholder={keyLoadedFromCloud ? "Key Loaded from Cloud" : "Paste Gemini API Key..."} className="w-full p-4 pr-12 rounded-lg bg-slate-800 border border-slate-700 text-white focus:ring-2 focus:ring-yellow-400 outline-none font-mono text-sm" />
+                                        <button onClick={() => setShowApiKey(!showApiKey)} className="absolute right-4 top-4 text-slate-500 hover:text-white">{showApiKey ? <EyeOff size={20} /> : <Eye size={20} />}</button>
+                                    </div>
+                                    <div className="flex justify-end gap-3">
+                                        <button onClick={() => setIsSettingsOpen(false)} className="px-4 py-2 text-slate-400 hover:text-white">取消</button>
+                                        <button onClick={saveApiKeyToCloud} disabled={isSavingKey || !userApiKey} className="bg-yellow-500 hover:bg-yellow-600 text-black font-bold px-6 py-2 rounded-lg flex items-center gap-2">{isSavingKey ? <RefreshCcw className="animate-spin" size={18} /> : <Cloud size={18} />} 儲存</button>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="space-y-6">
+                                <div>
+                                    <label className="block text-sm font-medium text-slate-700 mb-2">選擇程度</label>
+                                    <select value={userLevel} onChange={(e) => setUserLevel(e.target.value)} className="w-full p-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+                                        <option>HKDSE Level 2 (A2-B1)</option>
+                                        <option>HKDSE Level 3 (B1-B2)</option>
+                                        <option>HKDSE Level 4 (B2)</option>
+                                        <option>HKDSE Level 5+ (C1)</option>
+                                    </select>
+                                </div>
+                                <div className="bg-slate-50 p-4 rounded-lg border border-slate-200">
+                                    <label className="block text-sm font-medium text-slate-700 mb-2 flex items-center gap-2"><LinkIcon size={16} /> 網址匯入</label>
+                                    <div className="flex gap-2">
+                                        <input type="text" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder="https://..." className="flex-1 p-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none" />
+                                        <button onClick={fetchArticleFromUrl} disabled={fetchingUrl || !urlInput} className="bg-blue-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-blue-600 flex items-center gap-2">{fetchingUrl ? <RefreshCcw className="animate-spin" size={18} /> : <Download size={18} />} 抓取</button>
+                                    </div>
+                                </div>
+                                <textarea value={articleText} onChange={(e) => setArticleText(e.target.value)} placeholder="或在此貼上文章..." className="w-full h-48 p-4 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none resize-none font-mono text-sm" />
+                                <button onClick={startClass} disabled={!articleText.trim() || (!userApiKey && !defaultApiKey)} className={`w-full py-4 rounded-lg font-bold text-lg flex items-center justify-center gap-2 ${!articleText.trim() || (!userApiKey && !defaultApiKey) ? 'bg-gray-300 text-gray-500' : 'bg-blue-600 text-white hover:bg-blue-700'}`}>
+                                    <BookOpen size={20} /> {(!userApiKey && !defaultApiKey) ? "請先設定 Key" : "開始上課"}
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-          
-          {/* Navigation Footer */}
-          <div className="mt-8 flex justify-between items-center pt-6 border-t border-slate-200">
-            <button 
-              onClick={handlePrevSegment}
-              disabled={loading || currentSegmentIndex === 0}
-              className="flex items-center gap-2 text-slate-500 font-bold px-6 py-3 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent transition-all"
-            >
-              <ArrowLeft size={20} /> 上一段 (Prev)
-            </button>
+                );
+            }
 
-            <span className="text-sm font-mono text-slate-400">
-              Segment {currentSegmentIndex + 1} / {segments.length}
-            </span>
+            // Vocab Bank View
+            if (phase === 'vocab_bank') {
+                return (
+                    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6">
+                        <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-lg p-8 min-h-[80vh]">
+                            <header className="flex justify-between items-center mb-8 border-b pb-4">
+                                <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-3"><BookOpen className="text-amber-600" /> 我的雲端單字庫</h1>
+                                <button onClick={() => setPhase('setup')} className="text-slate-500 hover:text-blue-600 font-medium flex items-center gap-2"><ArrowLeft size={18} /> 返回</button>
+                            </header>
+                            {savedVocabList.length === 0 ? (
+                                <div className="text-center py-16 text-slate-400"><List size={48} className="mx-auto mb-4 opacity-50" /><p>目前沒有單字，快去上課或反白單字來新增！</p></div>
+                            ) : (
+                                <div className="grid gap-4 md:grid-cols-2">
+                                    {savedVocabList.map((item) => (
+                                        <div key={item.id} className="bg-white p-4 rounded-lg border border-slate-200 shadow-sm relative group">
+                                            <button onClick={() => deleteWordFromFirebase(item.id)} className="absolute top-3 right-3 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 size={18} /></button>
+                                            <div className="flex items-baseline justify-between mb-1"><h3 className="text-xl font-bold text-blue-700">{item.word}</h3><span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-500">{item.pos}</span></div>
+                                            <p className="text-slate-800 font-medium mb-1">{item.meaning_zh}</p>
+                                            <p className="text-sm text-slate-500 italic">{item.note}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                );
+            }
 
-            <button 
-              onClick={handleNextSegment}
-              disabled={loading}
-              className="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold flex items-center gap-2 hover:bg-blue-700 disabled:opacity-50 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
-            >
-              {currentSegmentIndex === segments.length - 1 ? "進入測驗" : "下一段 (Next)"}
-              <ArrowRight size={20} />
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
+            // Classroom View
+            if (phase === 'classroom') {
+                const data = segmentAnalyses[currentSegmentIndex];
+                return (
+                    <div className="min-h-screen bg-slate-50 font-sans text-slate-800" onClick={() => setSelection(null)}>
+                        <div className="max-w-4xl mx-auto p-6 relative">
+                            {selection && (
+                                <div className="absolute z-50 bg-slate-900 text-white p-2 rounded-lg shadow-xl flex items-center gap-2 transform -translate-x-1/2 -translate-y-full mb-2 animate-in" style={{ left: selection.x, top: selection.y, position: 'fixed' }} onClick={(e) => e.stopPropagation()}>
+                                    <span className="font-bold px-2 border-r border-slate-700">{selection.text}</span>
+                                    <button onClick={analyzeAndSaveSelection} disabled={analyzingSelection} className="flex items-center gap-1 bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded-md text-sm transition-colors">
+                                        {analyzingSelection ? <RefreshCcw className="animate-spin" size={14} /> : <PlusCircle size={14} />} 解釋並收藏
+                                    </button>
+                                </div>
+                            )}
+                            <header className="flex justify-between items-center mb-6 border-b pb-4">
+                                <h2 className="text-xl font-bold flex items-center gap-2 text-blue-900"><Brain className="text-blue-600" /> Segmented Teaching</h2>
+                                <span className="text-sm bg-blue-100 text-blue-800 px-3 py-1 rounded-full font-medium">{userLevel}</span>
+                            </header>
+                            <div className="w-full bg-gray-200 rounded-full h-2.5 mb-6"><div className="bg-blue-600 h-2.5 rounded-full transition-all duration-500" style={{ width: `${((currentSegmentIndex + 1) / segments.length) * 100}%` }}></div></div>
+                            
+                            {loading || !data ? (
+                                <LoadingSpinner text="AI 老師正在分析..." />
+                            ) : (
+                                <div className="grid md:grid-cols-2 gap-8">
+                                    <div className="space-y-6">
+                                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 relative" onMouseUp={handleTextSelection}>
+                                            <div className="absolute top-4 right-4 text-xs text-slate-300 flex items-center gap-1"><Search size={12} /> 反白單字可查詢</div>
+                                            <h3 className="text-sm font-bold text-slate-400 uppercase mb-3 tracking-wider">Original Text</h3>
+                                            <p className="text-lg leading-relaxed font-medium text-slate-800 selection:bg-yellow-200 selection:text-slate-900">{segments[currentSegmentIndex]}</p>
+                                        </div>
+                                        <div className="bg-amber-50 p-6 rounded-xl border border-amber-100">
+                                            <h3 className="text-sm font-bold text-amber-600 uppercase mb-3 tracking-wider flex items-center gap-2"><Type size={16} /> Grammar Note</h3>
+                                            <div className="text-amber-900"><span className="font-bold block mb-1">{data.grammar.title}</span><p className="text-sm opacity-90">{data.grammar.explanation}</p></div>
+                                        </div>
+                                        <details className="bg-slate-100 p-4 rounded-xl cursor-pointer group">
+                                            <summary className="font-medium text-slate-600 flex items-center gap-2 select-none"><Languages size={16} /> 查看中文翻譯 <ChevronDown className="ml-auto group-open:rotate-180 transition-transform" size={16} /></summary>
+                                            <p className="mt-3 text-slate-700 leading-relaxed border-t border-slate-200 pt-3">{data.translation}</p>
+                                        </details>
+                                    </div>
+                                    <div className="space-y-4">
+                                        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Award size={16} /> Key Vocabulary</h3>
+                                        <div className="space-y-3">
+                                            {data.vocab.map((word, idx) => (
+                                                <div key={idx} className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500 hover:shadow-md transition-shadow">
+                                                    <div className="flex justify-between items-baseline mb-1"><span className="text-lg font-bold text-blue-700">{word.word}</span><span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-500">{word.pos}</span></div>
+                                                    <p className="text-slate-800 font-medium">{word.meaning_zh}</p>
+                                                    <p className="text-sm text-slate-500 mt-1 italic">{word.note}</p>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                            
+                            <div className="mt-8 flex justify-between items-center pt-6 border-t border-slate-200">
+                                <button onClick={handlePrevSegment} disabled={loading || currentSegmentIndex === 0} className="flex items-center gap-2 text-slate-500 font-bold px-6 py-3 rounded-lg hover:bg-slate-100 disabled:opacity-30 disabled:hover:bg-transparent transition-all"><ArrowLeft size={20} /> 上一段</button>
+                                <span className="text-sm font-mono text-slate-400">Segment {currentSegmentIndex + 1} / {segments.length}</span>
+                                <button onClick={handleNextSegment} disabled={loading} className="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold flex items-center gap-2 hover:bg-blue-700 disabled:opacity-50 transition-all shadow-lg hover:shadow-xl transform hover:-translate-y-0.5">{currentSegmentIndex === segments.length - 1 ? "進入測驗" : "下一段"} <ArrowRight size={20} /></button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
 
-  // Quiz View
-  if (phase === 'quiz' && quizData) {
-    return (
-      <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6">
-        <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-lg p-8">
-          <header className="text-center mb-8 border-b pb-6">
-            <div className="bg-purple-100 text-purple-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4"><ClipboardList size={32} /></div>
-            <h2 className="text-2xl font-bold text-slate-800">Phase 2: Comprehension Check</h2>
-          </header>
-          <div className="space-y-8">
-            <section><h3 className="text-lg font-bold text-blue-900 mb-4 border-l-4 border-blue-500 pl-3">I. Multiple Choice</h3>{quizData.multiple_choice.map((q, i) => (<div key={q.id} className="bg-slate-50 p-4 rounded-lg mb-4"><p className="font-medium mb-3">{i+1}. {q.question}</p><div className="space-y-2">{q.options.map((opt, idx) => (<label key={idx} className="flex items-center gap-3 p-2 rounded hover:bg-slate-200 cursor-pointer"><input type="radio" name={q.id} className="w-4 h-4 text-blue-600" onChange={() => setUserAnswers(p => ({...p, [q.id]: opt}))} /><span>{opt}</span></label>))}</div></div>))}</section>
-            <section><h3 className="text-lg font-bold text-blue-900 mb-4 border-l-4 border-blue-500 pl-3">II. Summary Cloze</h3><div className="bg-orange-50 p-6 rounded-lg border border-orange-100 leading-loose">{quizData.cloze.text_with_blanks.split('______').map((part, i, arr) => (<React.Fragment key={i}>{part}{i < arr.length - 1 && (<input type="text" className="border-b-2 border-orange-300 bg-transparent text-center w-32 focus:outline-none focus:border-orange-600 mx-1 font-bold text-blue-700" placeholder={`(word ${i+1})`} onChange={(e) => setUserAnswers(p => ({...p, [`cloze_${i}`]: e.target.value}))} />)}</React.Fragment>))}</div></section>
-            <section><h3 className="text-lg font-bold text-blue-900 mb-4 border-l-4 border-blue-500 pl-3">III. Short Answer</h3>{quizData.short_answer.map((q) => (<div key={q.id} className="mb-4"><p className="font-medium mb-2">{q.question}</p><textarea className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none h-24 resize-none" onChange={(e) => setUserAnswers(p => ({...p, [q.id]: e.target.value}))} /></div>))}</section>
-          </div>
-          <div className="mt-8 text-center">{loading ? <LoadingSpinner text="正在批改..." /> : <button onClick={submitQuiz} className="bg-green-600 text-white px-12 py-3 rounded-lg font-bold text-lg hover:bg-green-700 shadow-lg">提交試卷</button>}</div>
-        </div>
-      </div>
-    );
-  }
+            // Quiz View
+            if (phase === 'quiz' && quizData) {
+                return (
+                    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6">
+                        <div className="max-w-3xl mx-auto bg-white rounded-xl shadow-lg p-8">
+                            <header className="text-center mb-8 border-b pb-6">
+                                <div className="bg-purple-100 text-purple-600 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4"><ClipboardList size={32} /></div>
+                                <h2 className="text-2xl font-bold text-slate-800">Phase 2: Comprehension Check</h2>
+                            </header>
+                            <div className="space-y-8">
+                                <section><h3 className="text-lg font-bold text-blue-900 mb-4 border-l-4 border-blue-500 pl-3">I. Multiple Choice</h3>{quizData.multiple_choice.map((q, i) => (<div key={q.id} className="bg-slate-50 p-4 rounded-lg mb-4"><p className="font-medium mb-3">{i+1}. {q.question}</p><div className="space-y-2">{q.options.map((opt, idx) => (<label key={idx} className="flex items-center gap-3 p-2 rounded hover:bg-slate-200 cursor-pointer"><input type="radio" name={q.id} className="w-4 h-4 text-blue-600" onChange={() => setUserAnswers(p => ({...p, [q.id]: opt}))} /><span>{opt}</span></label>))}</div></div>))}</section>
+                                <section><h3 className="text-lg font-bold text-blue-900 mb-4 border-l-4 border-blue-500 pl-3">II. Summary Cloze</h3><div className="bg-orange-50 p-6 rounded-lg border border-orange-100 leading-loose">{quizData.cloze.text_with_blanks.split('______').map((part, i, arr) => (<React.Fragment key={i}>{part}{i < arr.length - 1 && (<input type="text" className="border-b-2 border-orange-300 bg-transparent text-center w-32 focus:outline-none focus:border-orange-600 mx-1 font-bold text-blue-700" placeholder={`(word ${i+1})`} onChange={(e) => setUserAnswers(p => ({...p, [`cloze_${i}`]: e.target.value}))} />)}</React.Fragment>))}</div></section>
+                                <section><h3 className="text-lg font-bold text-blue-900 mb-4 border-l-4 border-blue-500 pl-3">III. Short Answer</h3>{quizData.short_answer.map((q) => (<div key={q.id} className="mb-4"><p className="font-medium mb-2">{q.question}</p><textarea className="w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none h-24 resize-none" onChange={(e) => setUserAnswers(p => ({...p, [q.id]: e.target.value}))} /></div>))}</section>
+                            </div>
+                            <div className="mt-8 text-center">{loading ? <LoadingSpinner text="正在批改..." /> : <button onClick={submitQuiz} className="bg-green-600 text-white px-12 py-3 rounded-lg font-bold text-lg hover:bg-green-700 shadow-lg">提交試卷</button>}</div>
+                        </div>
+                    </div>
+                );
+            }
 
-  // Report View
-  if (phase === 'review' && gradingResult) {
-    return (
-      <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6">
-        <div className="max-w-4xl mx-auto">
-          <div className="bg-white rounded-xl shadow-lg overflow-hidden mb-8">
-            <div className="bg-blue-900 text-white p-8 text-center"><h2 className="text-3xl font-bold mb-2">成績單</h2><div className="text-6xl font-black text-yellow-400 my-4">{gradingResult.score}</div><p className="text-blue-200 text-lg">{gradingResult.feedback}</p></div>
-            <div className="p-6 space-y-4">{gradingResult.corrections.map((item, i) => (<div key={i} className="border-b last:border-0 pb-4"><div className="flex justify-between items-start mb-1"><span className="font-medium text-slate-700">Q: {item.question_id}</span><span className="text-sm bg-red-100 text-red-800 px-2 py-0.5 rounded">Review</span></div><div className="grid grid-cols-2 gap-4 mt-2 text-sm"><div className="bg-red-50 p-3 rounded"><span className="block text-xs text-red-500 uppercase font-bold">You</span>{item.user_answer || "(Blank)"}</div><div className="bg-green-50 p-3 rounded"><span className="block text-xs text-green-600 uppercase font-bold">Correct</span>{item.correct_answer}</div></div><p className="mt-2 text-sm text-slate-600 italic">Note: {item.explanation}</p></div>))}</div>
-          </div>
-          <div className="bg-white rounded-xl shadow-lg p-8 mb-8"><header className="flex justify-between items-center mb-6 border-b pb-4"><div className="flex items-center gap-3"><div className="bg-amber-100 p-2 rounded-lg"><BookOpen className="text-amber-600" size={24} /></div><h2 className="text-xl font-bold text-slate-800">本次單字</h2></div><button onClick={saveAllVocab} className="bg-amber-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-amber-600 flex items-center gap-2 shadow-md"><Save size={18} /> 全部存入</button></header><div className="overflow-x-auto"><table className="w-full text-left border-collapse"><thead><tr className="bg-slate-100 text-slate-600 text-sm uppercase tracking-wider"><th className="p-3 rounded-tl-lg">Word</th><th className="p-3">PoS</th><th className="p-3">Meaning</th><th className="p-3 rounded-tr-lg">Note</th></tr></thead><tbody className="divide-y divide-slate-100">{Object.values(segmentAnalyses).flatMap(seg => seg.vocab).map((v, i) => (<tr key={i} className="hover:bg-slate-50"><td className="p-3 font-bold text-blue-700">{v.word}</td><td className="p-3 font-mono text-xs text-slate-500">{v.pos}</td><td className="p-3 text-slate-800">{v.meaning_zh}</td><td className="p-3 text-slate-500 text-sm">{v.note}</td></tr>))}</tbody></table></div></div>
-          <div className="flex justify-center gap-4 pb-8"><button onClick={() => window.location.reload()} className="flex items-center gap-2 text-slate-500 hover:text-blue-600 font-medium px-6 py-3"><RefreshCcw size={18} /> 開始新課程</button><button onClick={() => setPhase('vocab_bank')} className="flex items-center gap-2 bg-blue-100 text-blue-700 font-bold px-6 py-3 rounded-lg hover:bg-blue-200"><List size={18} /> 查看單字庫</button></div>
-        </div>
-      </div>
-    );
-  }
-  return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><LoadingSpinner /></div>;
-}
+            // Report View
+            if (phase === 'review' && gradingResult) {
+                return (
+                    <div className="min-h-screen bg-slate-50 font-sans text-slate-800 p-6">
+                        <div className="max-w-4xl mx-auto">
+                            <div className="bg-white rounded-xl shadow-lg overflow-hidden mb-8">
+                                <div className="bg-blue-900 text-white p-8 text-center"><h2 className="text-3xl font-bold mb-2">成績單</h2><div className="text-6xl font-black text-yellow-400 my-4">{gradingResult.score}</div><p className="text-blue-200 text-lg">{gradingResult.feedback}</p></div>
+                                <div className="p-6 space-y-4">{gradingResult.corrections.map((item, i) => (<div key={i} className="border-b last:border-0 pb-4"><div className="flex justify-between items-start mb-1"><span className="font-medium text-slate-700">Q: {item.question_id}</span><span className="text-sm bg-red-100 text-red-800 px-2 py-0.5 rounded">Review</span></div><div className="grid grid-cols-2 gap-4 mt-2 text-sm"><div className="bg-red-50 p-3 rounded"><span className="block text-xs text-red-500 uppercase font-bold">You</span>{item.user_answer || "(Blank)"}</div><div className="bg-green-50 p-3 rounded"><span className="block text-xs text-green-600 uppercase font-bold">Correct</span>{item.correct_answer}</div></div><p className="mt-2 text-sm text-slate-600 italic">Note: {item.explanation}</p></div>))}</div>
+                            </div>
+                            <div className="bg-white rounded-xl shadow-lg p-8 mb-8"><header className="flex justify-between items-center mb-6 border-b pb-4"><div className="flex items-center gap-3"><div className="bg-amber-100 p-2 rounded-lg"><BookOpen className="text-amber-600" size={24} /></div><h2 className="text-xl font-bold text-slate-800">本次單字</h2></div><button onClick={saveAllVocab} className="bg-amber-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-amber-600 flex items-center gap-2 shadow-md"><Save size={18} /> 全部存入</button></header><div className="overflow-x-auto"><table className="w-full text-left border-collapse"><thead><tr className="bg-slate-100 text-slate-600 text-sm uppercase tracking-wider"><th className="p-3 rounded-tl-lg">Word</th><th className="p-3">PoS</th><th className="p-3">Meaning</th><th className="p-3 rounded-tr-lg">Note</th></tr></thead><tbody className="divide-y divide-slate-100">{Object.values(segmentAnalyses).flatMap(seg => seg.vocab).map((v, i) => (<tr key={i} className="hover:bg-slate-50"><td className="p-3 font-bold text-blue-700">{v.word}</td><td className="p-3 font-mono text-xs text-slate-500">{v.pos}</td><td className="p-3 text-slate-800">{v.meaning_zh}</td><td className="p-3 text-slate-500 text-sm">{v.note}</td></tr>))}</tbody></table></div></div>
+                            <div className="flex justify-center gap-4 pb-8"><button onClick={() => window.location.reload()} className="flex items-center gap-2 text-slate-500 hover:text-blue-600 font-medium px-6 py-3"><RefreshCcw size={18} /> 開始新課程</button><button onClick={() => setPhase('vocab_bank')} className="flex items-center gap-2 bg-blue-100 text-blue-700 font-bold px-6 py-3 rounded-lg hover:bg-blue-200"><List size={18} /> 查看單字庫</button></div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return null;
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<EnglishCramSchool />);
+    </script>
+</body>
+</html>
