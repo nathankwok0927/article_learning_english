@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI English Tutor v2.0 (Enhanced)</title>
+    <title>AI English Tutor v2.4 (Segmentation Fix)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="importmap">
     {
@@ -21,7 +21,6 @@
     <style>
         .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
-        /* Selection color to make highlighting obvious */
         ::selection { background-color: #fef08a; color: #000; }
     </style>
 </head>
@@ -31,12 +30,12 @@
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from 'react';
         import { createRoot } from 'react-dom/client';
-        import { BookOpen, CheckCircle, GraduationCap, ArrowRight, ArrowLeft, RefreshCcw, Type, Languages, Brain, ChevronDown, ClipboardList, Award, Link as LinkIcon, Download, Save, Trash2, List, Settings, Key, Eye, EyeOff, Cloud, CloudLightning, Search, PlusCircle, X } from 'lucide-react';
+        import { BookOpen, CheckCircle, GraduationCap, ArrowRight, ArrowLeft, RefreshCcw, Type, Languages, Brain, ChevronDown, ClipboardList, Award, Link as LinkIcon, Download, Save, Trash2, List, Settings, Key, Eye, EyeOff, Cloud, CloudLightning, Search, PlusCircle, X, AlertTriangle } from 'lucide-react';
         import { initializeApp } from 'firebase/app';
         import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
         import { getFirestore, collection, addDoc, deleteDoc, query, onSnapshot, setDoc, getDoc, doc } from 'firebase/firestore';
 
-        // ⚠️ 請在此填入 Firebase Config
+        // ⚠️ Firebase Config (若無則使用 LocalStorage)
         const firebaseConfig = {
             apiKey: "AIzaSyA14c5Rjzun6C33DWiMmpyKNfXZ2BC6lso",
             authDomain: "ai-english-tutor-f2a01.firebaseapp.com",
@@ -47,31 +46,44 @@
             measurementId: "G-6RC6GV81E3"
         };
         
-        const APP_ID_TAG = "ai-tutor-v2-enhanced";
+        const APP_ID_TAG = "ai-tutor-v2-fix";
         const GEMINI_MODEL = "gemini-2.5-flash-preview-09-2025";
         const defaultApiKey = ""; 
 
-        // --- API Helpers ---
+        // --- API Helpers (With Timeout) ---
         async function generateContent(prompt, systemInstruction = "", userApiKey = null, temperature = 0.7) {
             const keyToUse = userApiKey || defaultApiKey;
             if (!keyToUse) throw new Error("請先設定 Gemini API Key");
 
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${keyToUse}`;
+            
             const payload = {
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: { responseMimeType: "application/json", temperature: temperature }
             };
             if (systemInstruction) payload.systemInstruction = { parts: [{ text: systemInstruction }] };
 
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            if (!response.ok) throw new Error("API Error");
-            const data = await response.json();
-            const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-            return JSON.parse(text.replace(/^```json\s*/, '').replace(/\s*```$/, ''));
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 20000); // 20s timeout
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: controller.signal
+                });
+                clearTimeout(id);
+
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+                const data = await response.json();
+                const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                return JSON.parse(text.replace(/^```json\s*/, '').replace(/\s*```$/, ''));
+            } catch (error) {
+                clearTimeout(id);
+                if (error.name === 'AbortError') throw new Error("連線逾時，請重試。");
+                throw error;
+            }
         }
 
         async function generateTextContent(prompt, userApiKey = null) {
@@ -79,24 +91,44 @@
             if (!keyToUse) throw new Error("No API Key");
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${keyToUse}`;
             
-            // Temperature 0.1 ensure strict extraction without creativity
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    contents: [{ parts: [{ text: prompt }] }],
-                    generationConfig: { temperature: 0.1 } 
-                })
-            });
-            if (!response.ok) throw new Error("API Failed");
-            const data = await response.json();
-            return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { temperature: 0.1 } 
+                    }),
+                    signal: controller.signal
+                });
+                clearTimeout(id);
+                if (!response.ok) throw new Error("API Failed");
+                const data = await response.json();
+                return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            } catch (error) {
+                clearTimeout(id);
+                throw error;
+            }
         }
 
-        const LoadingSpinner = ({ text }) => (
-            <div className="flex flex-col items-center justify-center py-12 text-blue-600 animate-pulse">
-                <Brain size={48} className="mb-4" />
-                <p className="text-lg font-medium font-sans">{text || "AI 導師正在分析..."}</p>
+        // --- Error/Loading UI ---
+        const LoadingView = ({ text, onRetry, error }) => (
+            <div className="flex flex-col items-center justify-center py-12 text-slate-500 animate-in fade-in">
+                {error ? (
+                    <div className="text-center">
+                        <div className="bg-red-100 p-4 rounded-full inline-block mb-3 text-red-500"><AlertTriangle size={32} /></div>
+                        <p className="text-red-600 font-bold mb-2">{error}</p>
+                        <button onClick={onRetry} className="bg-red-600 text-white px-6 py-2 rounded-full font-bold hover:bg-red-700 shadow-lg flex items-center gap-2 mx-auto"><RefreshCcw size={16} /> 重試</button>
+                    </div>
+                ) : (
+                    <>
+                        <Brain size={48} className="mb-4 text-blue-600 animate-pulse" />
+                        <p className="text-lg font-medium font-sans">{text || "AI 導師正在分析..."}</p>
+                    </>
+                )}
             </div>
         );
 
@@ -106,7 +138,7 @@
             const [db, setDb] = useState(null);
             const [localVocab, setLocalVocab] = useState([]);
             
-            // Persistent State (Auto-save targets)
+            // Persistent State (Auto-save)
             const [phase, setPhase] = useState('setup');
             const [userLevel, setUserLevel] = useState('HKDSE Level 2 (A2-B1)');
             const [articleText, setArticleText] = useState('');
@@ -121,9 +153,9 @@
             const [isSettingsOpen, setIsSettingsOpen] = useState(false);
             const [showApiKey, setShowApiKey] = useState(false);
             const [loading, setLoading] = useState(false);
+            const [fetchError, setFetchError] = useState(null); 
             const [fetchingUrl, setFetchingUrl] = useState(false);
             
-            // New Features State
             const [selection, setSelection] = useState(null);
             const [analyzingSelection, setAnalyzingSelection] = useState(false);
             const [hasSavedSession, setHasSavedSession] = useState(false);
@@ -151,7 +183,6 @@
                 } catch (e) { console.warn("Firebase skipped"); }
             }, []);
 
-            // Auto-Save
             useEffect(() => {
                 if (phase === 'classroom' && articleText) {
                     const data = { phase, userLevel, articleText, segments, currentSegmentIndex, segmentAnalyses, timestamp: Date.now() };
@@ -185,7 +216,7 @@
                 setIsSettingsOpen(false);
             };
 
-            // Vocab Logic (Hybrid)
+            // Vocab Logic
             const saveWord = async (wordData) => {
                 const newWord = { ...wordData, id: Date.now().toString(), timestamp: Date.now() };
                 const updated = [newWord, ...localVocab];
@@ -205,7 +236,6 @@
                 }
             };
 
-            // Sync Cloud
             useEffect(() => {
                 if (user && db) {
                     const q = collection(db, 'artifacts', APP_ID_TAG, 'users', user.uid, 'vocabulary');
@@ -228,8 +258,13 @@
                     
                     if (!html) throw new Error("無法抓取網頁，請手動複製。");
                     
-                    // v2.0 Strict Prompt
-                    const prompt = `Extract the main article content from the HTML below. Return ONLY the plain text of the article. Do not summarize. Do not rewrite. Keep it verbatim.\n\nHTML: ${html.slice(0, 150000)}`;
+                    // FIXED PROMPT: Enforce Paragraph Structure
+                    const prompt = `
+                        Extract the article content from the HTML below. 
+                        **CRITICAL:** You MUST separate each paragraph with TWO newlines (\\n\\n). 
+                        Do NOT merge paragraphs. Do NOT summarize.
+                        HTML: ${html.slice(0, 150000)}
+                    `;
                     const text = await generateTextContent(prompt, userApiKey);
                     
                     if (!text || text.length < 50) throw new Error("提取內容過少");
@@ -240,42 +275,56 @@
 
             const startClass = () => {
                 if (!articleText.trim()) return;
-                const raw = articleText.split(/\n\s*\n/).filter(s => s.trim().length > 0);
+                
+                // Smart Splitting Logic
+                let raw = articleText.split(/\n\s*\n/); // Try splitting by double newline first
+                
+                // Fallback: If only 1 segment found (AI failed to split), try single newline but filter short noise
+                if (raw.length <= 1) {
+                    raw = articleText.split(/\n/).filter(s => s.trim().length > 30); // Only keep lines > 30 chars
+                } else {
+                    raw = raw.filter(s => s.trim().length > 0);
+                }
+
+                if (raw.length === 0) {
+                    alert("無法分段，請檢查文章格式");
+                    return;
+                }
+
                 setSegments(raw);
                 setPhase('classroom');
                 setCurrentSegmentIndex(0);
                 setSegmentAnalyses({});
             };
 
-            // Analyze
-            useEffect(() => {
-                if (phase === 'classroom' && segments.length > 0) {
-                    const idx = currentSegmentIndex;
-                    if (!segmentAnalyses[idx]) {
-                        setLoading(true);
-                        const prompt = `
-                            You are an ESL Tutor. Analyze this text for ${userLevel}.
-                            Text: "${segments[idx]}"
-                            Return JSON:
-                            {
-                                "vocab": [{ "word": "string", "pos": "string", "meaning_zh": "Traditional Chinese", "note": "Simple English definition" }],
-                                "grammar": { "title": "string", "explanation": "Traditional Chinese" },
-                                "translation": "Traditional Chinese"
-                            }
-                            Select 3-5 difficult words.
-                        `;
-                        generateContent(prompt, "", userApiKey)
-                            .then(data => {
-                                setSegmentAnalyses(p => ({ ...p, [idx]: data }));
-                                setLoading(false);
-                            })
-                            .catch(e => {
-                                console.error(e);
-                                setLoading(false);
-                            });
-                    }
+            const analyzeSegment = async () => {
+                if (segmentAnalyses[currentSegmentIndex]) return;
+                
+                setLoading(true);
+                setFetchError(null);
+                
+                try {
+                    const prompt = `
+                        Analyze for ${userLevel}: "${segments[currentSegmentIndex]}"
+                        Return JSON:
+                        {
+                            "vocab": [{ "word": "word", "pos": "pos", "meaning_zh": "chi", "note": "eng def" }],
+                            "grammar": { "title": "point", "explanation": "chi" },
+                            "translation": "chi"
+                        }
+                        Max 4 words.
+                    `;
+                    const res = await generateContent(prompt, "", userApiKey, 0.7);
+                    setSegmentAnalyses(prev => ({...prev, [currentSegmentIndex]: res}));
+                } catch (e) { 
+                    console.error(e);
+                    setFetchError(e.message); 
+                } finally {
+                    setLoading(false);
                 }
-            }, [phase, currentSegmentIndex, segments]);
+            };
+
+            useEffect(() => { if (phase === 'classroom') analyzeSegment(); }, [phase, currentSegmentIndex]);
 
             // Highlight Logic
             const handleTextSelection = () => {
@@ -283,13 +332,8 @@
                 if (!sel || sel.isCollapsed) return;
                 const text = sel.toString().trim();
                 if (text.length === 0 || text.length > 50) { setSelection(null); return; }
-                
                 const rect = sel.getRangeAt(0).getBoundingClientRect();
-                setSelection({ 
-                    text, 
-                    x: rect.left + window.scrollX + rect.width / 2, 
-                    y: rect.top + window.scrollY - 10 
-                });
+                setSelection({ text, x: rect.left + window.scrollX + rect.width / 2, y: rect.top + window.scrollY - 10 });
             };
 
             const saveHighlight = async () => {
@@ -300,7 +344,7 @@
                     const res = await generateContent(prompt, "", userApiKey);
                     await saveWord(res);
                     setSelection(null);
-                } catch(e) { alert("分析失敗"); }
+                } catch(e) { alert("分析失敗: " + e.message); }
                 setAnalyzingSelection(false);
             };
 
@@ -331,8 +375,8 @@
                                     </button>
                                 </div>
                                 <div className="bg-blue-100 p-3 rounded-full w-16 h-16 flex items-center justify-center mx-auto mb-4"><GraduationCap size={32} className="text-blue-600" /></div>
-                                <h1 className="text-3xl font-bold text-slate-800 mb-2">AI 英文補習班 v2.0</h1>
-                                <p className="text-slate-500">Enhanced Edition</p>
+                                <h1 className="text-3xl font-bold text-slate-800 mb-2">AI 英文補習班 v2.4</h1>
+                                <p className="text-slate-500">Segmentation Fix Edition</p>
                             </div>
 
                             {isSettingsOpen && (
@@ -376,10 +420,13 @@
 
             if (phase === 'classroom') {
                 const data = segmentAnalyses[currentSegmentIndex];
+                
+                if (loading || (!data && !fetchError)) return <div className="min-h-screen bg-slate-50 font-sans p-6"><div className="max-w-4xl mx-auto"><LoadingView /></div></div>;
+                if (fetchError && !data) return <div className="min-h-screen bg-slate-50 font-sans p-6"><div className="max-w-4xl mx-auto"><LoadingView error={fetchError} onRetry={analyzeSegment} /></div></div>;
+
                 return (
                     <div className="min-h-screen bg-slate-50 font-sans text-slate-800" onClick={() => setSelection(null)}>
                         <div className="max-w-4xl mx-auto p-6 relative">
-                            {/* Highlight Popover */}
                             {selection && (
                                 <div className="fixed z-50 bg-slate-900 text-white p-2 rounded shadow-xl flex gap-2 transform -translate-x-1/2 -translate-y-full" style={{ left: selection.x, top: selection.y }} onClick={e => e.stopPropagation()}>
                                     <span className="font-bold border-r border-slate-600 pr-2">{selection.text}</span>
@@ -396,45 +443,39 @@
 
                             <div className="w-full bg-gray-200 rounded-full h-2.5 mb-6"><div className="bg-blue-600 h-2.5 rounded-full transition-all duration-500" style={{ width: `${((currentSegmentIndex + 1) / segments.length) * 100}%` }}></div></div>
 
-                            {loading || !data ? (
-                                <LoadingSpinner text="AI 老師正在分析這段文章..." />
-                            ) : (
-                                <div className="grid md:grid-cols-2 gap-8">
-                                    {/* Left: Text */}
-                                    <div className="space-y-6">
-                                        <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 relative group" onMouseUp={handleTextSelection}>
-                                            <div className="absolute top-2 right-2 text-xs text-slate-300 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><Search size={12}/> 反白查單字</div>
-                                            <h3 className="text-sm font-bold text-slate-400 uppercase mb-3 tracking-wider">Original Text</h3>
-                                            <p className="text-lg leading-relaxed font-medium text-slate-800">{segments[currentSegmentIndex]}</p>
-                                        </div>
-                                        <div className="bg-amber-50 p-6 rounded-xl border border-amber-100">
-                                            <h3 className="text-sm font-bold text-amber-600 uppercase mb-3 tracking-wider flex items-center gap-2"><Type size={16} /> Grammar Note</h3>
-                                            <div className="text-amber-900"><span className="font-bold block mb-1">{data.grammar.title}</span><p className="text-sm opacity-90">{data.grammar.explanation}</p></div>
-                                        </div>
-                                        <details className="bg-slate-100 p-4 rounded-xl cursor-pointer group">
-                                            <summary className="font-medium text-slate-600 flex items-center gap-2 select-none"><Languages size={16} /> 查看中文翻譯 <ChevronDown className="ml-auto group-open:rotate-180 transition-transform" size={16} /></summary>
-                                            <p className="mt-3 text-slate-700 leading-relaxed border-t border-slate-200 pt-3">{data.translation}</p>
-                                        </details>
+                            <div className="grid md:grid-cols-2 gap-8">
+                                <div className="space-y-6">
+                                    <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 relative group" onMouseUp={handleTextSelection}>
+                                        <div className="absolute top-2 right-2 text-xs text-slate-300 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity"><Search size={12}/> 反白查單字</div>
+                                        <h3 className="text-sm font-bold text-slate-400 uppercase mb-3 tracking-wider">Original Text</h3>
+                                        <p className="text-lg leading-relaxed font-medium text-slate-800">{segments[currentSegmentIndex]}</p>
                                     </div>
-                                    {/* Right: Vocab */}
-                                    <div className="space-y-4">
-                                        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Award size={16} /> Key Vocabulary</h3>
-                                        <div className="space-y-3">
-                                            {data.vocab.map((word, idx) => (
-                                                <div key={idx} className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500 hover:shadow-md transition-shadow relative">
-                                                    <div className="flex justify-between items-baseline mb-1">
-                                                        <span className="text-lg font-bold text-blue-700">{word.word}</span>
-                                                        <span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-500">{word.pos}</span>
-                                                    </div>
-                                                    <p className="text-slate-800 font-medium">{word.meaning_zh}</p>
-                                                    <p className="text-sm text-slate-500 mt-1 italic">{word.note}</p>
-                                                    <button onClick={() => saveWord(word)} className="mt-2 text-xs text-blue-500 flex items-center gap-1 hover:underline"><Save size={12}/> 收藏</button>
+                                    <div className="bg-amber-50 p-6 rounded-xl border border-amber-100">
+                                        <h3 className="text-sm font-bold text-amber-600 uppercase mb-3 tracking-wider flex items-center gap-2"><Type size={16} /> Grammar Note</h3>
+                                        <div className="text-amber-900"><span className="font-bold block mb-1">{data.grammar.title}</span><p className="text-sm opacity-90">{data.grammar.explanation}</p></div>
+                                    </div>
+                                    <details className="bg-slate-100 p-4 rounded-xl cursor-pointer group">
+                                        <summary className="font-medium text-slate-600 flex items-center gap-2 select-none"><Languages size={16} /> 查看中文翻譯 <ChevronDown className="ml-auto group-open:rotate-180 transition-transform" size={16} /></summary>
+                                        <p className="mt-3 text-slate-700 leading-relaxed border-t border-slate-200 pt-3">{data.translation}</p>
+                                    </details>
+                                </div>
+                                <div className="space-y-4">
+                                    <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2"><Award size={16} /> Key Vocabulary</h3>
+                                    <div className="space-y-3">
+                                        {data.vocab.map((word, idx) => (
+                                            <div key={idx} className="bg-white p-4 rounded-lg shadow-sm border-l-4 border-blue-500 hover:shadow-md transition-shadow relative">
+                                                <div className="flex justify-between items-baseline mb-1">
+                                                    <span className="text-lg font-bold text-blue-700">{word.word}</span>
+                                                    <span className="text-xs font-mono bg-slate-100 px-2 py-1 rounded text-slate-500">{word.pos}</span>
                                                 </div>
-                                            ))}
-                                        </div>
+                                                <p className="text-slate-800 font-medium">{word.meaning_zh}</p>
+                                                <p className="text-sm text-slate-500 mt-1 italic">{word.note}</p>
+                                                <button onClick={() => saveWord(word)} className="mt-2 text-xs text-blue-500 flex items-center gap-1 hover:underline"><Save size={12}/> 收藏</button>
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
-                            )}
+                            </div>
 
                             <div className="mt-8 flex justify-between pt-6 border-t border-slate-200">
                                 <button 
@@ -450,7 +491,7 @@
                                     disabled={loading}
                                     className="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold flex items-center gap-2 hover:bg-blue-700 disabled:opacity-50 shadow-lg"
                                 >
-                                    {currentSegmentIndex === segments.length - 1 ? "完成課程" : "下一段 (Next Segment)"}
+                                    {currentSegmentIndex === segments.length - 1 ? "完成課程" : "下一段 (Next)"}
                                     <ArrowRight size={20} />
                                 </button>
                             </div>
